@@ -140,22 +140,9 @@ async fn load_assets() -> Assets {
     }
 }
 
-// Utility function for drawing text with position and scale relative to screen size
-fn draw_scaled_text(text: &str, x_ratio: f32, y_ratio: f32, font_size: f32, color: Color) {
-    let x = screen_width() * x_ratio;
-    let y = screen_height() * y_ratio;
-    draw_text(text, x, y, font_size * screen_height(), color);
-}
-
 // Game entity struct
 struct GameEntity {
     rect: Rect,
-    velocity: Vec2,
-}
-
-enum MoveDirection {
-    Left,
-    Right,
 }
 
 impl GameEntity {
@@ -182,6 +169,24 @@ impl GameEntity {
             },
         );
     }
+}
+
+// Game entity struct
+struct MovingGameEntity {
+    entity: GameEntity,
+    velocity: Vec2,
+}
+
+impl MovingGameEntity {
+    fn apply_velocity(&mut self, delta_time: f32) {
+        self.entity.rect.x += self.velocity.x * delta_time;
+        self.entity.rect.y += self.velocity.y * delta_time;
+    }
+}
+
+enum MoveDirection {
+    Left,
+    Right,
 }
 
 // Reasons for game over
@@ -258,19 +263,27 @@ async fn game_over_screen(assets: &Assets, reason: GameOverReason) {
         // Display score on game over screen (except for End and Win)
         if let Some(final_score_text) = &final_score_text {
             // Position score text properly in the game over box using scaled text
-            draw_scaled_text(final_score_text, 0.415, 0.227, 0.04, WHITE);
+            draw_text(
+                final_score_text,
+                screen_width() * 0.415,
+                screen_height() * 0.227,
+                0.04 * screen_height(),
+                WHITE,
+            );
         }
     }
 }
 
 async fn game_screen(assets: &Assets) -> GameOverReason {
     // Create player
-    let mut player = GameEntity {
-        rect: Rect {
-            x: PLAYER_START_POS.x - PLAYER_SIZE.x / 2.0,
-            y: PLAYER_START_POS.y - PLAYER_SIZE.y / 2.0,
-            w: PLAYER_SIZE.x,
-            h: PLAYER_SIZE.y,
+    let mut player = MovingGameEntity {
+        entity: GameEntity {
+            rect: Rect {
+                x: PLAYER_START_POS.x - PLAYER_SIZE.x / 2.0,
+                y: PLAYER_START_POS.y - PLAYER_SIZE.y / 2.0,
+                w: PLAYER_SIZE.x,
+                h: PLAYER_SIZE.y,
+            },
         },
         velocity: Vec2::ZERO,
     };
@@ -288,22 +301,23 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
                     w: BACKGROUND_SIZE.x,
                     h: BACKGROUND_SIZE.y,
                 },
-                velocity: Vec2::ZERO,
             }
         })
         .collect();
 
     // Create clouds with random positions and velocities
-    let mut clouds: Vec<GameEntity> = (0..=40)
+    let mut clouds: Vec<MovingGameEntity> = (0..=40)
         .map(|i| {
             let x = -1024.0 + 500.0 * i as f32;
             let y = gen_range(100.0, 500.0); // Random height
-            GameEntity {
-                rect: Rect {
-                    x: x - CLOUD_SIZE.x / 2.0,
-                    y: y - CLOUD_SIZE.y / 2.0,
-                    w: CLOUD_SIZE.x,
-                    h: CLOUD_SIZE.y,
+            MovingGameEntity {
+                entity: GameEntity {
+                    rect: Rect {
+                        x: x - CLOUD_SIZE.x / 2.0,
+                        y: y - CLOUD_SIZE.y / 2.0,
+                        w: CLOUD_SIZE.x,
+                        h: CLOUD_SIZE.y,
+                    },
                 },
                 velocity: Vec2::new(gen_range(20.0, 60.0), 0.0), // Random horizontal velocity
             }
@@ -320,7 +334,6 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
                 w: PLATFORM_SIZE.x,
                 h: PLATFORM_SIZE.y,
             },
-            velocity: Vec2::ZERO,
         })
         .chain((0..60).map(|i| {
             let x = i as f32 * 50.0 + gen_range(-200.0, 200.0); // Adjust random offset to be smaller
@@ -332,7 +345,6 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
                     w: PLATFORM_BAR_SIZE.x,
                     h: PLATFORM_BAR_SIZE.y,
                 },
-                velocity: Vec2::ZERO,
             }
         }))
         .collect();
@@ -354,13 +366,12 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
                     w: EGG_SIZE.x,
                     h: EGG_SIZE.y,
                 },
-                velocity: Vec2::ZERO,
             }
         })
         .collect();
 
     // Create chickens with completely random positioning, independent of platforms
-    let mut chickens: Vec<GameEntity> = (0..20)
+    let mut chickens: Vec<MovingGameEntity> = (0..20)
         .map(|_| {
             // Random x position across the game world
             // Distribute chickens throughout the game world with some spacing
@@ -372,12 +383,14 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
             let vx = gen_range(50.0, 150.0) * (if gen_range(0, 2) == 0 { 1.0 } else { -1.0 });
             let vy = gen_range(30.0, 80.0) * (if gen_range(0, 2) == 0 { 1.0 } else { -1.0 });
 
-            GameEntity {
-                rect: Rect {
-                    x: x - CHICKEN_SIZE.x / 2.0,
-                    y: y - CHICKEN_SIZE.y / 2.0,
-                    w: CHICKEN_SIZE.x,
-                    h: CHICKEN_SIZE.y,
+            MovingGameEntity {
+                entity: GameEntity {
+                    rect: Rect {
+                        x: x - CHICKEN_SIZE.x / 2.0,
+                        y: y - CHICKEN_SIZE.y / 2.0,
+                        w: CHICKEN_SIZE.x,
+                        h: CHICKEN_SIZE.y,
+                    },
                 },
                 velocity: Vec2::new(vx, vy),
             }
@@ -397,7 +410,6 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
                 w: SPIKE_SIZE.x,
                 h: SPIKE_SIZE.y,
             },
-            velocity: Vec2::ZERO,
         })
         .collect();
 
@@ -409,7 +421,6 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
             w: HOUSE_SIZE.x,
             h: HOUSE_SIZE.y,
         },
-        velocity: Vec2::ZERO,
     };
 
     loop {
@@ -444,15 +455,15 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
 
             let ground_collision = platforms.iter().find_map(|platform| {
                 // Check horizontal overlap using Rect methods
-                let horizontally_overlapping =
-                    player.rect.right() > platform.rect.x && player.rect.x < platform.rect.right();
+                let horizontally_overlapping = player.entity.rect.right() > platform.rect.x
+                    && player.entity.rect.x < platform.rect.right();
 
                 // Check vertical conditions for ground detection
                 let falling_towards_platform = player.velocity.y >= 0.0;
                 let close_to_platform_top =
-                    player.rect.bottom() <= platform.rect.y + GROUND_DETECTION_BUFFER;
+                    player.entity.rect.bottom() <= platform.rect.y + GROUND_DETECTION_BUFFER;
                 let will_intersect_next_frame =
-                    player.rect.bottom() + player.velocity.y * delta_time >= platform.rect.y;
+                    player.entity.rect.bottom() + player.velocity.y * delta_time >= platform.rect.y;
 
                 if horizontally_overlapping
                     && falling_towards_platform
@@ -465,39 +476,33 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
                 }
             });
 
-            player.rect.x += player.velocity.x * delta_time;
-            player.rect.y += player.velocity.y * delta_time;
+            player.apply_velocity(delta_time);
 
             if let Some(platform_top) = ground_collision {
-                player.rect.y = platform_top - player.rect.h;
+                player.entity.rect.y = platform_top - player.entity.rect.h;
                 player.velocity.y = 0.0;
             }
 
-            if player.rect.bottom() > screen_height() + 100.0 {
+            if player.entity.rect.bottom() > screen_height() + 100.0 {
                 return GameOverReason::Death { score };
             }
 
             // Update chickens with fixed timestep
             for chicken in &mut chickens {
-                let new_x = chicken.rect.x + chicken.velocity.x * delta_time;
-                let new_y = chicken.rect.y + chicken.velocity.y * delta_time;
-                if new_x > 5000.0 || new_x < 0.0 {
+                chicken.apply_velocity(delta_time);
+                if chicken.entity.rect.x > 5000.0 || chicken.entity.rect.x < 0.0 {
                     chicken.velocity.x = -chicken.velocity.x;
-                } else {
-                    chicken.rect.x = new_x;
-                };
-                if new_y > 800.0 || new_y < 0.0 {
+                }
+                if chicken.entity.rect.y > 800.0 || chicken.entity.rect.y < 0.0 {
                     chicken.velocity.y = -chicken.velocity.y;
-                } else {
-                    chicken.rect.y = new_y;
-                };
+                }
             }
 
             // Update clouds with fixed timestep
             for cloud in &mut clouds {
-                cloud.rect.x += cloud.velocity.x * delta_time;
-                if cloud.rect.x > 60000.0 {
-                    cloud.rect.x = -1024.0;
+                cloud.apply_velocity(delta_time);
+                if cloud.entity.rect.x > 60000.0 {
+                    cloud.entity.rect.x = -1024.0;
                 }
             }
         }
@@ -506,6 +511,7 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
         {
             eggs.retain(|egg| {
                 let collided = player
+                    .entity
                     .get_collision_bounds()
                     .overlaps(&egg.get_collision_bounds());
                 if collided {
@@ -517,8 +523,9 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
 
             if chickens.iter().any(|chicken| {
                 player
+                    .entity
                     .get_collision_bounds()
-                    .overlaps(&chicken.get_collision_bounds())
+                    .overlaps(&chicken.entity.get_collision_bounds())
             }) {
                 play_sound_once(&assets.chicken_hit);
                 return GameOverReason::Death { score };
@@ -526,6 +533,7 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
 
             if spikes.iter().any(|spike| {
                 player
+                    .entity
                     .get_collision_bounds()
                     .overlaps(&spike.get_collision_bounds())
             }) {
@@ -534,6 +542,7 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
             }
 
             if player
+                .entity
                 .get_collision_bounds()
                 .overlaps(&house.get_collision_bounds())
             {
@@ -550,7 +559,7 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
             clear_background(BACKGROUND_COLOR);
 
             // Calculate camera position based on player
-            let camera_x = (player.rect.center().x - screen_width() / 2.0).max(0.0);
+            let camera_x = (player.entity.rect.center().x - screen_width() / 2.0).max(0.0);
 
             // Setup Camera2D with explicit control over the coordinate system
             let mut camera = Camera2D::from_display_rect(Rect::new(
@@ -570,7 +579,7 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
                 background.draw(&assets.background);
             }
             for cloud in &clouds {
-                cloud.draw(&assets.cloud);
+                cloud.entity.draw(&assets.cloud);
             }
             for platform in &platforms {
                 platform.draw(&assets.platform);
@@ -583,11 +592,11 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
                 spike.draw(&assets.spike);
             }
             for chicken in &chickens {
-                chicken.draw(&assets.chicken);
+                chicken.entity.draw(&assets.chicken);
             }
             match player_direction {
-                MoveDirection::Right => player.draw(&assets.player_right),
-                MoveDirection::Left => player.draw(&assets.player_left),
+                MoveDirection::Right => player.entity.draw(&assets.player_right),
+                MoveDirection::Left => player.entity.draw(&assets.player_left),
             }
 
             // Switch back to default camera for UI elements
@@ -604,8 +613,20 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
                     ..Default::default()
                 },
             );
-            draw_scaled_text(&format!("Score: {}/5", score), 0.75, 0.07, 0.03, WHITE);
-            draw_scaled_text(&format!("🥚 + {}/2", score), 0.75, 0.10, 0.03, WHITE);
+            draw_text(
+                &format!("Score: {}/5", score),
+                screen_width() * 0.75,
+                screen_height() * 0.07,
+                0.03 * screen_height(),
+                WHITE,
+            );
+            draw_text(
+                &format!("🥚 + {}/2", score),
+                screen_width() * 0.75,
+                screen_height() * 0.10,
+                0.03 * screen_height(),
+                WHITE,
+            );
         }
     }
 }
