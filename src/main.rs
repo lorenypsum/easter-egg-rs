@@ -1,12 +1,19 @@
 // These lines disable certain warnings from Clippy, a Rust linter.
 // Useful for focusing on core logic, but good to address these in larger projects.
-#![allow(clippy::pedantic, clippy::nursery, clippy::manual_range_contains)]
+#![allow(
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::manual_range_contains,
+    clippy::too_many_lines
+)]
+use std::iter::once;
+
 use macroquad::audio::{
     load_sound_from_bytes, play_sound, play_sound_once, PlaySoundParams, Sound,
 };
 use macroquad::camera::{set_camera, set_default_camera, Camera2D};
 use macroquad::prelude::*;
-use macroquad::rand::{gen_range, ChooseRandom}; // For generating random numbers and choices
+use macroquad::rand::gen_range; // For generating random numbers and choices
 
 // --- Physics Constants ---
 // Defines how quickly objects fall downwards (pixels per second squared).
@@ -51,6 +58,507 @@ const BACKGROUND_COLOR: Color = Color {
     b: 0.78, // Blue component (0.0 to 1.0)
     a: 1.0,  // Alpha (transparency) component (1.0 is fully opaque)
 };
+
+/// Represents a basic game object with a position and size (a rectangle).
+struct GameEntity {
+    /// The rectangle defining the entity's position (x, y) and dimensions (w, h).
+    rect: Rect,
+}
+
+impl GameEntity {
+    /// Calculates the collision bounding box, slightly smaller than the visual rectangle.
+    /// This uses `COLLISION_MARGIN` to prevent overly sensitive collisions.
+    fn get_collision_bounds(&self) -> Rect {
+        Rect {
+            x: self.rect.x + COLLISION_MARGIN,       // Move right edge inwards
+            y: self.rect.y + COLLISION_MARGIN,       // Move top edge downwards
+            w: self.rect.w - COLLISION_MARGIN * 2.0, // Reduce width
+            h: self.rect.h - COLLISION_MARGIN * 2.0, // Reduce height
+        }
+    }
+}
+
+/// Represents a game entity that can move.
+/// Contains a `GameEntity` for position/size and a `velocity` vector.
+struct MovingGameEntity {
+    /// The underlying entity with position and size.
+    entity: GameEntity,
+    /// The speed and direction of movement (pixels per second).
+    velocity: Vec2,
+}
+
+impl MovingGameEntity {
+    /// Updates the entity's position based on its velocity and the time elapsed since the last frame.
+    /// `delta_time`: The time in seconds since the last frame update.
+    fn apply_velocity(&mut self, delta_time: f32) {
+        // Update position: position = position + velocity * time
+        self.entity.rect.x += self.velocity.x * delta_time;
+        self.entity.rect.y += self.velocity.y * delta_time;
+    }
+}
+
+/// Represents the direction the player is currently facing. Used for drawing the correct sprite.
+enum MoveDirection {
+    Left,
+    Right,
+}
+
+/// Represents the different reasons why the game might end.
+enum DeathCause {
+    Chicken,
+    Spike,
+    Fall,
+}
+
+/// Represents the different reasons why the game might end.
+enum GameOverReason {
+    /// Player died (hit enemy, spike, fell off screen). Includes the final score.
+    Death { cause: DeathCause, score: u32 },
+    /// Player reached the house but didn't have enough eggs to win.
+    End { meme: usize },
+    /// Player reached the house with enough eggs.
+    Win,
+}
+
+enum Event {
+    Jumped,
+    Scored,
+    GameOver(GameOverReason),
+}
+
+enum State {
+    Start,
+    Game {
+        player: MovingGameEntity,
+        player_direction: MoveDirection,
+        score: u32,
+        clouds: Vec<MovingGameEntity>,
+        platforms: Vec<GameEntity>,
+        eggs: Vec<GameEntity>,
+        chickens: Vec<MovingGameEntity>,
+        spikes: Vec<GameEntity>,
+        house: GameEntity,
+        background_entities: Vec<GameEntity>,
+    },
+    GameOver(GameOverReason),
+}
+
+impl State {
+    fn new_game(&mut self) {
+        // Create the player character as a moving entity.
+        let player = MovingGameEntity {
+            entity: GameEntity {
+                rect: Rect {
+                    // Center the player horizontally at the start position
+                    x: PLAYER_START_POS.x - PLAYER_SIZE.x / 2.0,
+                    // Center the player vertically at the start position
+                    y: PLAYER_START_POS.y - PLAYER_SIZE.y / 2.0,
+                    w: PLAYER_SIZE.x, // Use predefined player width
+                    h: PLAYER_SIZE.y, // Use predefined player height
+                },
+            },
+            velocity: Vec2::ZERO, // Start with no initial movement
+        };
+        // Create background images. They are placed side-by-side to create a long scrolling background.
+        // `(0..=60)` creates a range from 0 to 60 (inclusive).
+        // `.map()` transforms each number `i` in the range into a `GameEntity`.
+        // `.collect()` gathers the results into a `Vec<GameEntity>`.
+        let background_entities: Vec<GameEntity> = (0..=60)
+            .map(|i| {
+                // Calculate the x position for each background segment.
+                let x = -1024.0 + i as f32 * 1024.0;
+                GameEntity {
+                    rect: Rect {
+                        x: x - BACKGROUND_SIZE.x / 2.0,     // Center the background image
+                        y: 336.0 - BACKGROUND_SIZE.y / 2.0, // Position vertically
+                        w: BACKGROUND_SIZE.x,
+                        h: BACKGROUND_SIZE.y,
+                    },
+                }
+            })
+            .collect();
+
+        // Create clouds with random positions and horizontal movement speeds.
+        let clouds: Vec<MovingGameEntity> = (0..=40)
+            .map(|i| {
+                // Distribute clouds horizontally.
+                let x = -1024.0 + 500.0 * i as f32;
+                // Place clouds at random heights.
+                let y = gen_range(100.0, 500.0);
+                MovingGameEntity {
+                    entity: GameEntity {
+                        rect: Rect {
+                            x: x - CLOUD_SIZE.x / 2.0, // Center the cloud image
+                            y: y - CLOUD_SIZE.y / 2.0, // Center the cloud image
+                            w: CLOUD_SIZE.x,
+                            h: CLOUD_SIZE.y,
+                        },
+                    },
+                    // Give each cloud a random horizontal speed.
+                    velocity: Vec2::new(gen_range(20.0, 60.0), 0.0), // No vertical velocity
+                }
+            })
+            .collect();
+
+        // Create platforms. Includes ground platforms and floating platforms.
+        let platforms: Vec<GameEntity> = (-429..=2000) // Range for ground platform positions
+            .step_by(400) // Place ground platforms 400 units apart
+            .map(|x| GameEntity {
+                // Create ground platforms
+                rect: Rect {
+                    x: x as f32 - PLATFORM_SIZE.x / 2.0,  // Center horizontally
+                    y: screen_height() - PLATFORM_SIZE.y, // Place at the bottom of the screen
+                    w: PLATFORM_SIZE.x,
+                    h: PLATFORM_SIZE.y,
+                },
+            })
+            // `.chain()` combines the ground platforms with the floating platforms.
+            .chain((0..60).map(|i| {
+                // Create 60 floating platforms
+                // Calculate x position with some randomness.
+                let x = i as f32 * 50.0 + gen_range(-200.0, 200.0);
+                // Place at random heights within a range.
+                let y = gen_range(150.0, 650.0);
+                GameEntity {
+                    // Use the smaller platform bar size
+                    rect: Rect {
+                        x: x - PLATFORM_BAR_SIZE.x / 2.0, // Center horizontally
+                        y: y - PLATFORM_BAR_SIZE.y / 2.0, // Center vertically
+                        w: PLATFORM_BAR_SIZE.x,
+                        h: PLATFORM_BAR_SIZE.y,
+                    },
+                }
+            }))
+            .collect(); // Collect all platforms into a single Vec
+
+        // Create eggs, placing them on top of some existing platforms.
+        let eggs: Vec<GameEntity> = platforms
+            .iter() // Iterate over the platforms
+            .filter(|_| gen_range(0, 100) < 30) // Keep only about 30% of platforms to spawn an egg on
+            .enumerate() // Get both the index (i) and the platform
+            .map(|(i, platform)| {
+                // Create an egg for each selected platform
+                // Calculate a horizontal offset to spread eggs across the platform width
+                let offset = (i as f32 - 0.5) * (platform.rect.w * 0.5);
+                let x = platform.rect.center().x + offset; // Position egg horizontally on platform
+                let y = platform.rect.y - EGG_SIZE.y + 5.0; // Position egg just above the platform surface
+
+                GameEntity {
+                    rect: Rect {
+                        x: x - EGG_SIZE.x / 2.0, // Center the egg horizontally
+                        y,                       // Use the calculated y position
+                        w: EGG_SIZE.x,
+                        h: EGG_SIZE.y,
+                    },
+                }
+            })
+            .collect(); // Collect the created eggs into a Vec
+
+        // Create flying chickens with random starting positions and velocities.
+        let chickens: Vec<MovingGameEntity> = (0..20) // Create 20 chickens
+            .map(|_| {
+                // The `_` means we don't need the loop counter value
+                // Random horizontal position within a wide range of the game world.
+                let x = gen_range(500.0, 4000.0);
+                // Random vertical position within the typical play area.
+                let y = gen_range(100.0, 600.0);
+
+                // Random horizontal speed, can be left or right.
+                let vx = gen_range(50.0, 150.0) * (if gen_range(0, 2) == 0 { 1.0 } else { -1.0 });
+                // Random vertical speed, can be up or down.
+                let vy = gen_range(30.0, 80.0) * (if gen_range(0, 2) == 0 { 1.0 } else { -1.0 });
+
+                MovingGameEntity {
+                    entity: GameEntity {
+                        rect: Rect {
+                            x: x - CHICKEN_SIZE.x / 2.0, // Center horizontally
+                            y: y - CHICKEN_SIZE.y / 2.0, // Center vertically
+                            w: CHICKEN_SIZE.x,
+                            h: CHICKEN_SIZE.y,
+                        },
+                    },
+                    velocity: Vec2::new(vx, vy), // Set the random velocity
+                }
+            })
+            .collect();
+
+        // Create spikes, placing them on top of some ground platforms.
+        let spikes: Vec<GameEntity> = platforms
+            .iter() // Iterate over platforms
+            .filter(|platform| {
+                // Select only ground platforms (check if their center is near the bottom)
+                platform.rect.center().y > screen_height() - PLATFORM_SIZE.y
+                // And only place spikes randomly (1 in 5 chance for selected platforms)
+                && gen_range(0, 5) == 0
+            })
+            .map(|platform| GameEntity {
+                // Create a spike for each selected platform
+                rect: Rect {
+                    // Position spike towards the right edge of the platform
+                    x: platform.rect.right() - SPIKE_SIZE.x / 2.0,
+                    // Position spike just above the platform surface
+                    y: platform.rect.y - SPIKE_SIZE.y + 5.0,
+                    w: SPIKE_SIZE.x,
+                    h: SPIKE_SIZE.y,
+                },
+            })
+            .collect();
+
+        // Create the final house structure (the end goal).
+        let house = GameEntity {
+            rect: Rect {
+                x: 3000.0 - HOUSE_SIZE.x / 2.0, // Position horizontally far into the level
+                y: 292.0 - HOUSE_SIZE.y / 2.0,  // Position vertically
+                w: HOUSE_SIZE.x,
+                h: HOUSE_SIZE.y,
+            },
+        };
+
+        *self = Self::Game {
+            player,
+            player_direction: MoveDirection::Right,
+            score: 0,
+            clouds,
+            platforms,
+            eggs,
+            chickens,
+            spikes,
+            house,
+            background_entities,
+        };
+    }
+
+    fn process_input(&mut self) -> Vec<Event> {
+        let mut events: Vec<Event> = vec![];
+        match self {
+            State::Start => {
+                if is_key_pressed(KeyCode::P) {
+                    self.new_game();
+                }
+            }
+            State::Game {
+                player,
+                player_direction,
+                ..
+            } => {
+                // Check left/right movement keys. `is_key_down` checks if held.
+                match (is_key_down(KeyCode::Left), is_key_down(KeyCode::Right)) {
+                    (true, false) => {
+                        // Left key is down, Right key is up
+                        *player_direction = MoveDirection::Left; // Set facing direction
+                        player.velocity.x = -PLAYER_MOVEMENT_SPEED; // Set horizontal velocity leftwards
+                    }
+                    (false, true) => {
+                        // Left key is up, Right key is down
+                        *player_direction = MoveDirection::Right; // Set facing direction
+                        player.velocity.x = PLAYER_MOVEMENT_SPEED; // Set horizontal velocity rightwards
+                    }
+                    _ => {
+                        // Neither or both keys are pressed
+                        player.velocity.x = 0.0; // Stop horizontal movement
+                    }
+                };
+                // Check jump key. `is_key_pressed` checks if pressed *this frame*.
+                // `player.velocity.y == 0.0` checks if the player is on the ground (or apex of jump).
+                if is_key_pressed(KeyCode::Up) && player.velocity.y == 0.0 {
+                    player.velocity.y = -PLAYER_JUMP_SPEED; // Set vertical velocity upwards (jump)
+                    events.push(Event::Jumped);
+                }
+            }
+            State::GameOver(_) => {
+                // Handle input for the game over screen.
+                if is_key_pressed(KeyCode::R) {
+                    self.new_game();
+                }
+            }
+        }
+        events
+    }
+
+    fn update(&mut self, delta_time: f32) -> Vec<Event> {
+        let mut events: Vec<Event> = vec![];
+        let State::Game {
+            player,
+            score,
+            clouds,
+            platforms,
+            eggs,
+            chickens,
+            spikes,
+            house,
+            ..
+        } = self
+        else {
+            return events;
+        };
+        // --- Update Game State (Physics and Movement) ---
+        {
+            // Apply gravity to the player's vertical velocity.
+            player.velocity.y += GRAVITY * delta_time;
+
+            // --- Platform Collision Detection (Ground Check) ---
+            // Find the first platform the player might land on.
+            let ground_collision = platforms.iter().find_map(|platform| {
+                // Check if player's horizontal range overlaps with the platform's horizontal range.
+                let horizontally_overlapping = player.entity.rect.right() > platform.rect.x
+                    && player.entity.rect.x < platform.rect.right();
+
+                // Check if player is moving downwards or is stationary vertically.
+                let falling_towards_platform = player.velocity.y >= 0.0;
+                // Check if the player's bottom is slightly above or at the platform's top.
+                let close_to_platform_top =
+                    player.entity.rect.bottom() <= platform.rect.y + GROUND_DETECTION_BUFFER;
+                // Predict if the player *will* be below the platform top in the next frame.
+                let will_intersect_next_frame =
+                    player.entity.rect.bottom() + player.velocity.y * delta_time >= platform.rect.y;
+
+                // If all conditions are met, the player is about to land on this platform.
+                if horizontally_overlapping
+                    && falling_towards_platform
+                    && close_to_platform_top
+                    && will_intersect_next_frame
+                {
+                    // Return the Y-coordinate of the platform's top surface.
+                    Some(platform.rect.y)
+                } else {
+                    // Otherwise, no collision with this platform.
+                    None
+                }
+            });
+
+            // Update player position based on velocity.
+            player.apply_velocity(delta_time);
+
+            // --- Handle Ground Collision Response ---
+            // If `ground_collision` found a platform (`Some(platform_top)`)...
+            if let Some(platform_top) = ground_collision {
+                // Snap the player's bottom edge to the top of the platform.
+                player.entity.rect.y = platform_top - player.entity.rect.h;
+                // Stop vertical movement.
+                player.velocity.y = 0.0;
+            }
+
+            // --- Update Chicken Movement ---
+            for chicken in chickens.iter_mut() {
+                // Apply velocity to update position.
+                chicken.apply_velocity(delta_time);
+                // Simple boundary check: reverse horizontal velocity if chicken hits world edges.
+                if chicken.entity.rect.x > 5000.0 || chicken.entity.rect.x < 0.0 {
+                    chicken.velocity.x = -chicken.velocity.x;
+                }
+                // Simple boundary check: reverse vertical velocity if chicken hits vertical limits.
+                if chicken.entity.rect.y > 800.0 || chicken.entity.rect.y < 0.0 {
+                    chicken.velocity.y = -chicken.velocity.y;
+                }
+            }
+
+            // --- Update Cloud Movement ---
+            for cloud in clouds {
+                // Apply velocity to update position.
+                cloud.apply_velocity(delta_time);
+                // If cloud moves too far right, wrap it around to the left side.
+                if cloud.entity.rect.x > 60000.0 {
+                    // Use a large boundary for wrapping
+                    cloud.entity.rect.x = -1024.0; // Reset position far left
+                }
+            }
+        }
+
+        // --- Check Collisions and Game Logic ---
+        {
+            // --- Check Player Falling Off Screen ---
+            // If player falls too far below the screen...
+            if player.entity.rect.bottom() > screen_height() + 100.0 {
+                // End the game due to death.
+                events.push(Event::GameOver(GameOverReason::Death {
+                    cause: DeathCause::Fall,
+                    score: *score,
+                }));
+                *self = State::GameOver(GameOverReason::Death {
+                    cause: DeathCause::Fall,
+                    score: *score,
+                });
+                return events;
+            }
+
+            // --- Egg Collection ---
+            // `retain` keeps only the elements for which the closure returns true.
+            eggs.retain(|egg| {
+                // Check if the player's collision bounds overlap with the egg's bounds.
+                let collided = player
+                    .entity
+                    .get_collision_bounds()
+                    .overlaps(&egg.get_collision_bounds());
+                if collided {
+                    *score += 1; // Increase score
+                    events.push(Event::Scored);
+                }
+                // Return `!collided`: keep the egg if NOT collided, remove it if collided.
+                !collided
+            });
+
+            // --- Chicken Collision ---
+            // Check if the player collides with any chicken.
+            if chickens.iter().any(|chicken| {
+                // `any` returns true if the closure is true for at least one element
+                player
+                    .entity
+                    .get_collision_bounds()
+                    .overlaps(&chicken.entity.get_collision_bounds())
+            }) {
+                events.push(Event::GameOver(GameOverReason::Death {
+                    cause: DeathCause::Chicken,
+                    score: *score,
+                }));
+                *self = State::GameOver(GameOverReason::Death {
+                    cause: DeathCause::Chicken,
+                    score: *score,
+                });
+                return events;
+            }
+
+            // --- Spike Collision ---
+            // Check if the player collides with any spike.
+            if spikes.iter().any(|spike| {
+                player
+                    .entity
+                    .get_collision_bounds()
+                    .overlaps(&spike.get_collision_bounds())
+            }) {
+                events.push(Event::GameOver(GameOverReason::Death {
+                    cause: DeathCause::Spike,
+                    score: *score,
+                }));
+                *self = State::GameOver(GameOverReason::Death {
+                    cause: DeathCause::Spike,
+                    score: *score,
+                });
+                return events;
+            }
+
+            // --- House Collision (End/Win Condition) ---
+            // Check if the player collides with the house.
+            if player
+                .entity
+                .get_collision_bounds()
+                .overlaps(&house.get_collision_bounds())
+            {
+                // Check if the player has enough eggs to win.
+                if *score >= EGGS_NEEDED_FOR_WIN {
+                    events.push(Event::GameOver(GameOverReason::Win));
+                    *self = State::GameOver(GameOverReason::Win);
+                } else if *score >= EGGS_NEEDED_FOR_HOUSE {
+                    // Player reached the house but needs more eggs.
+                    let meme = gen_range(0, 8);
+                    events.push(Event::GameOver(GameOverReason::End { meme }));
+                    *self = State::GameOver(GameOverReason::End { meme });
+                }
+                // If player has fewer eggs than needed for the house, nothing happens yet.
+            }
+        }
+        events
+    }
+}
 
 /// Holds all the textures (images) and sounds used in the game.
 /// Loading these upfront helps prevent lag during gameplay.
@@ -173,541 +681,36 @@ async fn load_assets() -> Assets {
     }
 }
 
-/// Represents a basic game object with a position and size (a rectangle).
-struct GameEntity {
-    /// The rectangle defining the entity's position (x, y) and dimensions (w, h).
-    rect: Rect,
-}
-
-impl GameEntity {
-    /// Calculates the collision bounding box, slightly smaller than the visual rectangle.
-    /// This uses `COLLISION_MARGIN` to prevent overly sensitive collisions.
-    fn get_collision_bounds(&self) -> Rect {
-        Rect {
-            x: self.rect.x + COLLISION_MARGIN,       // Move right edge inwards
-            y: self.rect.y + COLLISION_MARGIN,       // Move top edge downwards
-            w: self.rect.w - COLLISION_MARGIN * 2.0, // Reduce width
-            h: self.rect.h - COLLISION_MARGIN * 2.0, // Reduce height
-        }
-    }
-
-    /// Draws the entity's texture at its position and size.
-    /// `texture`: The `Texture2D` to draw for this entity.
-    fn draw(&self, texture: &Texture2D) {
-        draw_texture_ex(
-            texture,     // The image to draw
-            self.rect.x, // X position on screen
-            self.rect.y, // Y position on screen
-            WHITE,       // Tint color (WHITE means no tint)
-            DrawTextureParams {
-                // Ensure the texture is drawn at the entity's width and height
-                dest_size: Some(Vec2::new(self.rect.w, self.rect.h)),
-                ..DrawTextureParams::default() // Use default values for other parameters
-            },
-        );
-    }
-}
-
-/// Represents a game entity that can move.
-/// Contains a `GameEntity` for position/size and a `velocity` vector.
-struct MovingGameEntity {
-    /// The underlying entity with position and size.
-    entity: GameEntity,
-    /// The speed and direction of movement (pixels per second).
-    velocity: Vec2,
-}
-
-impl MovingGameEntity {
-    /// Updates the entity's position based on its velocity and the time elapsed since the last frame.
-    /// `delta_time`: The time in seconds since the last frame update.
-    fn apply_velocity(&mut self, delta_time: f32) {
-        // Update position: position = position + velocity * time
-        self.entity.rect.x += self.velocity.x * delta_time;
-        self.entity.rect.y += self.velocity.y * delta_time;
-    }
-}
-
-/// Represents the direction the player is currently facing. Used for drawing the correct sprite.
-enum MoveDirection {
-    Left,
-    Right,
-}
-
-/// Represents the different reasons why the game might end.
-enum GameOverReason {
-    /// Player died (hit enemy, spike, fell off screen). Includes the final score.
-    Death { score: u32 },
-    /// Player reached the house but didn't have enough eggs to win.
-    End,
-    /// Player reached the house with enough eggs.
-    Win,
-}
-
-/// Displays the initial start screen. Waits for the player to press 'P' to begin.
-/// `texture_assets`: A reference to the loaded game assets.
-async fn start_screen(texture_assets: &Assets) {
-    // Start playing the background music on loop.
-    play_sound(
-        &texture_assets.background_music,
-        PlaySoundParams {
-            looped: true, // Keep playing after it finishes
-            volume: 0.5,  // Set volume to 50%
-        },
-    );
-
-    // Loop indefinitely until the start condition is met.
-    loop {
-        // Wait for the next frame before drawing again.
-        next_frame().await;
-
-        // Check if the 'P' key was pressed *this frame*.
-        if is_key_pressed(KeyCode::P) {
-            break; // Exit the loop to start the game.
-        }
-
-        // Clear the screen with the background color.
-        clear_background(BACKGROUND_COLOR);
-        // Draw the start screen image, scaled to fit the window.
-        draw_texture_ex(
-            &texture_assets.game_start,
-            0.0,   // Draw at top-left corner (x=0)
-            0.0,   // Draw at top-left corner (y=0)
-            WHITE, // No tint
-            DrawTextureParams {
-                // Scale the image to fill the entire screen width and height
-                dest_size: Some(Vec2::new(screen_width(), screen_height())),
-                ..Default::default() // Use defaults for other parameters
-            },
-        );
-    }
-}
-
-/// Displays the game over screen based on the reason for ending.
-/// Waits for the player to press 'R' to restart.
-/// `assets`: A reference to the loaded game assets.
-/// `reason`: The `GameOverReason` enum variant indicating why the game ended.
-async fn game_over_screen(assets: &Assets, reason: GameOverReason) {
-    // Play a sound effect based on how the game ended.
-    match reason {
-        GameOverReason::Death { .. } => play_sound_once(&assets.game_over_sound), // Play death sound
-        GameOverReason::End => play_sound_once(&assets.magic), // Play "reached end" sound
-        GameOverReason::Win => play_sound_once(&assets.win_sound), // Play win sound
-    }
-
-    // Choose the appropriate game over image based on the reason.
-    let texture = match reason {
-        GameOverReason::Death { .. } => &assets.game_over, // Standard game over screen
-        GameOverReason::End => assets.meme_textures.choose().unwrap(), // Pick a random meme
-        GameOverReason::Win => &assets.win,                // Winning screen
-    };
-
-    // Prepare the final score text only if the player died.
-    let final_score_text = if let GameOverReason::Death { score, .. } = reason {
-        // If the reason was Death, format the score string.
-        Some(format!("Final Score: {score}"))
-    } else {
-        // Otherwise, there's no score to display on this screen.
-        None
-    };
-
-    // Loop indefinitely until the restart condition is met.
-    loop {
-        // Wait for the next frame.
-        next_frame().await;
-
-        // Check if the 'R' key was pressed *this frame*.
-        if is_key_pressed(KeyCode::R) {
-            break; // Exit the loop to restart the game.
-        }
-
-        // Clear the screen.
-        clear_background(BACKGROUND_COLOR);
-        // Draw the chosen game over/win/end screen image, scaled to fit.
-        draw_texture_ex(
-            texture,
-            0.0,
-            0.0,
-            WHITE,
-            DrawTextureParams {
-                dest_size: Some(Vec2::new(screen_width(), screen_height())),
-                ..Default::default()
-            },
-        );
-
-        // If there's final score text to display (only on Death screen)...
-        if let Some(final_score_text) = &final_score_text {
-            // Calculate text position relative to screen size for consistent placement.
-            let text_x = screen_width() * 0.415;
-            let text_y = screen_height() * 0.227;
-            let font_size = 0.04 * screen_height(); // Scale font size with screen height
-                                                    // Draw the final score text.
-            draw_text(final_score_text, text_x, text_y, font_size, WHITE);
-        }
-    }
-}
-
-/// Runs the main game loop, handling player input, physics, collisions, and drawing.
-/// Returns a `GameOverReason` when the game ends.
-/// `assets`: A reference to the loaded game assets.
-async fn game_screen(assets: &Assets) -> GameOverReason {
-    // --- Initialize Game State ---
-
-    // Create the player character as a moving entity.
-    let mut player = MovingGameEntity {
-        entity: GameEntity {
-            rect: Rect {
-                // Center the player horizontally at the start position
-                x: PLAYER_START_POS.x - PLAYER_SIZE.x / 2.0,
-                // Center the player vertically at the start position
-                y: PLAYER_START_POS.y - PLAYER_SIZE.y / 2.0,
-                w: PLAYER_SIZE.x, // Use predefined player width
-                h: PLAYER_SIZE.y, // Use predefined player height
-            },
-        },
-        velocity: Vec2::ZERO, // Start with no initial movement
-    };
-    // Track the direction the player is facing (starts facing right).
-    let mut player_direction = MoveDirection::Right;
-    // Initialize the player's score.
-    let mut score = 0;
-
-    // Create background images. They are placed side-by-side to create a long scrolling background.
-    // `(0..=60)` creates a range from 0 to 60 (inclusive).
-    // `.map()` transforms each number `i` in the range into a `GameEntity`.
-    // `.collect()` gathers the results into a `Vec<GameEntity>`.
-    let background_entities: Vec<GameEntity> = (0..=60)
-        .map(|i| {
-            // Calculate the x position for each background segment.
-            let x = -1024.0 + i as f32 * 1024.0;
-            GameEntity {
-                rect: Rect {
-                    x: x - BACKGROUND_SIZE.x / 2.0,     // Center the background image
-                    y: 336.0 - BACKGROUND_SIZE.y / 2.0, // Position vertically
-                    w: BACKGROUND_SIZE.x,
-                    h: BACKGROUND_SIZE.y,
+fn draw(state: &State, assets: &Assets) {
+    // Clear the screen with the background color.
+    clear_background(BACKGROUND_COLOR);
+    match state {
+        State::Start => {
+            // Draw the start screen image, scaled to fit the window.
+            draw_texture_ex(
+                &assets.game_start,
+                0.0,   // Draw at top-left corner (x=0)
+                0.0,   // Draw at top-left corner (y=0)
+                WHITE, // No tint
+                DrawTextureParams {
+                    // Scale the image to fill the entire screen width and height
+                    dest_size: Some(Vec2::new(screen_width(), screen_height())),
+                    ..Default::default() // Use defaults for other parameters
                 },
-            }
-        })
-        .collect();
-
-    // Create clouds with random positions and horizontal movement speeds.
-    let mut clouds: Vec<MovingGameEntity> = (0..=40)
-        .map(|i| {
-            // Distribute clouds horizontally.
-            let x = -1024.0 + 500.0 * i as f32;
-            // Place clouds at random heights.
-            let y = gen_range(100.0, 500.0);
-            MovingGameEntity {
-                entity: GameEntity {
-                    rect: Rect {
-                        x: x - CLOUD_SIZE.x / 2.0, // Center the cloud image
-                        y: y - CLOUD_SIZE.y / 2.0, // Center the cloud image
-                        w: CLOUD_SIZE.x,
-                        h: CLOUD_SIZE.y,
-                    },
-                },
-                // Give each cloud a random horizontal speed.
-                velocity: Vec2::new(gen_range(20.0, 60.0), 0.0), // No vertical velocity
-            }
-        })
-        .collect();
-
-    // Create platforms. Includes ground platforms and floating platforms.
-    let platforms: Vec<GameEntity> = (-429..=2000) // Range for ground platform positions
-        .step_by(400) // Place ground platforms 400 units apart
-        .map(|x| GameEntity {
-            // Create ground platforms
-            rect: Rect {
-                x: x as f32 - PLATFORM_SIZE.x / 2.0,  // Center horizontally
-                y: screen_height() - PLATFORM_SIZE.y, // Place at the bottom of the screen
-                w: PLATFORM_SIZE.x,
-                h: PLATFORM_SIZE.y,
-            },
-        })
-        // `.chain()` combines the ground platforms with the floating platforms.
-        .chain((0..60).map(|i| {
-            // Create 60 floating platforms
-            // Calculate x position with some randomness.
-            let x = i as f32 * 50.0 + gen_range(-200.0, 200.0);
-            // Place at random heights within a range.
-            let y = gen_range(150.0, 650.0);
-            GameEntity {
-                // Use the smaller platform bar size
-                rect: Rect {
-                    x: x - PLATFORM_BAR_SIZE.x / 2.0, // Center horizontally
-                    y: y - PLATFORM_BAR_SIZE.y / 2.0, // Center vertically
-                    w: PLATFORM_BAR_SIZE.x,
-                    h: PLATFORM_BAR_SIZE.y,
-                },
-            }
-        }))
-        .collect(); // Collect all platforms into a single Vec
-
-    // Create eggs, placing them on top of some existing platforms.
-    let mut eggs: Vec<GameEntity> = platforms
-        .iter() // Iterate over the platforms
-        .filter(|_| gen_range(0, 100) < 30) // Keep only about 30% of platforms to spawn an egg on
-        .enumerate() // Get both the index (i) and the platform
-        .map(|(i, platform)| {
-            // Create an egg for each selected platform
-            // Calculate a horizontal offset to spread eggs across the platform width
-            let offset = (i as f32 - 0.5) * (platform.rect.w * 0.5);
-            let x = platform.rect.center().x + offset; // Position egg horizontally on platform
-            let y = platform.rect.y - EGG_SIZE.y + 5.0; // Position egg just above the platform surface
-
-            GameEntity {
-                rect: Rect {
-                    x: x - EGG_SIZE.x / 2.0, // Center the egg horizontally
-                    y,                       // Use the calculated y position
-                    w: EGG_SIZE.x,
-                    h: EGG_SIZE.y,
-                },
-            }
-        })
-        .collect(); // Collect the created eggs into a Vec
-
-    // Create flying chickens with random starting positions and velocities.
-    let mut chickens: Vec<MovingGameEntity> = (0..20) // Create 20 chickens
-        .map(|_| {
-            // The `_` means we don't need the loop counter value
-            // Random horizontal position within a wide range of the game world.
-            let x = gen_range(500.0, 4000.0);
-            // Random vertical position within the typical play area.
-            let y = gen_range(100.0, 600.0);
-
-            // Random horizontal speed, can be left or right.
-            let vx = gen_range(50.0, 150.0) * (if gen_range(0, 2) == 0 { 1.0 } else { -1.0 });
-            // Random vertical speed, can be up or down.
-            let vy = gen_range(30.0, 80.0) * (if gen_range(0, 2) == 0 { 1.0 } else { -1.0 });
-
-            MovingGameEntity {
-                entity: GameEntity {
-                    rect: Rect {
-                        x: x - CHICKEN_SIZE.x / 2.0, // Center horizontally
-                        y: y - CHICKEN_SIZE.y / 2.0, // Center vertically
-                        w: CHICKEN_SIZE.x,
-                        h: CHICKEN_SIZE.y,
-                    },
-                },
-                velocity: Vec2::new(vx, vy), // Set the random velocity
-            }
-        })
-        .collect();
-
-    // Create spikes, placing them on top of some ground platforms.
-    let spikes: Vec<GameEntity> = platforms
-        .iter() // Iterate over platforms
-        .filter(|platform| {
-            // Select only ground platforms (check if their center is near the bottom)
-            platform.rect.center().y > screen_height() - PLATFORM_SIZE.y
-            // And only place spikes randomly (1 in 5 chance for selected platforms)
-            && gen_range(0, 5) == 0
-        })
-        .map(|platform| GameEntity {
-            // Create a spike for each selected platform
-            rect: Rect {
-                // Position spike towards the right edge of the platform
-                x: platform.rect.right() - SPIKE_SIZE.x / 2.0,
-                // Position spike just above the platform surface
-                y: platform.rect.y - SPIKE_SIZE.y + 5.0,
-                w: SPIKE_SIZE.x,
-                h: SPIKE_SIZE.y,
-            },
-        })
-        .collect();
-
-    // Create the final house structure (the end goal).
-    let house = GameEntity {
-        rect: Rect {
-            x: 3000.0 - HOUSE_SIZE.x / 2.0, // Position horizontally far into the level
-            y: 292.0 - HOUSE_SIZE.y / 2.0,  // Position vertically
-            w: HOUSE_SIZE.x,
-            h: HOUSE_SIZE.y,
-        },
-    };
-
-    // --- Main Game Loop ---
-    loop {
-        // Wait for the next frame and clear the screen for drawing.
-        next_frame().await;
-
-        // --- Handle Player Input ---
-        {
-            // Check left/right movement keys. `is_key_down` checks if held.
-            match (is_key_down(KeyCode::Left), is_key_down(KeyCode::Right)) {
-                (true, false) => {
-                    // Left key is down, Right key is up
-                    player_direction = MoveDirection::Left; // Set facing direction
-                    player.velocity.x = -PLAYER_MOVEMENT_SPEED; // Set horizontal velocity leftwards
-                }
-                (false, true) => {
-                    // Left key is up, Right key is down
-                    player_direction = MoveDirection::Right; // Set facing direction
-                    player.velocity.x = PLAYER_MOVEMENT_SPEED; // Set horizontal velocity rightwards
-                }
-                _ => {
-                    // Neither or both keys are pressed
-                    player.velocity.x = 0.0; // Stop horizontal movement
-                }
-            };
-            // Check jump key. `is_key_pressed` checks if pressed *this frame*.
-            // `player.velocity.y == 0.0` checks if the player is on the ground (or apex of jump).
-            if is_key_pressed(KeyCode::Up) && player.velocity.y == 0.0 {
-                player.velocity.y = -PLAYER_JUMP_SPEED; // Set vertical velocity upwards (jump)
-                play_sound_once(&assets.jump); // Play jump sound effect
-            }
+            );
         }
-
-        // --- Update Game State (Physics and Movement) ---
-        {
-            // Get the time elapsed since the last frame (in seconds).
-            // Used for frame-rate independent physics.
-            let delta_time = get_frame_time();
-
-            // Apply gravity to the player's vertical velocity.
-            player.velocity.y += GRAVITY * delta_time;
-
-            // --- Platform Collision Detection (Ground Check) ---
-            // Find the first platform the player might land on.
-            let ground_collision = platforms.iter().find_map(|platform| {
-                // Check if player's horizontal range overlaps with the platform's horizontal range.
-                let horizontally_overlapping = player.entity.rect.right() > platform.rect.x
-                    && player.entity.rect.x < platform.rect.right();
-
-                // Check if player is moving downwards or is stationary vertically.
-                let falling_towards_platform = player.velocity.y >= 0.0;
-                // Check if the player's bottom is slightly above or at the platform's top.
-                let close_to_platform_top =
-                    player.entity.rect.bottom() <= platform.rect.y + GROUND_DETECTION_BUFFER;
-                // Predict if the player *will* be below the platform top in the next frame.
-                let will_intersect_next_frame =
-                    player.entity.rect.bottom() + player.velocity.y * delta_time >= platform.rect.y;
-
-                // If all conditions are met, the player is about to land on this platform.
-                if horizontally_overlapping
-                    && falling_towards_platform
-                    && close_to_platform_top
-                    && will_intersect_next_frame
-                {
-                    // Return the Y-coordinate of the platform's top surface.
-                    Some(platform.rect.y)
-                } else {
-                    // Otherwise, no collision with this platform.
-                    None
-                }
-            });
-
-            // Update player position based on velocity.
-            player.apply_velocity(delta_time);
-
-            // --- Handle Ground Collision Response ---
-            // If `ground_collision` found a platform (`Some(platform_top)`)...
-            if let Some(platform_top) = ground_collision {
-                // Snap the player's bottom edge to the top of the platform.
-                player.entity.rect.y = platform_top - player.entity.rect.h;
-                // Stop vertical movement.
-                player.velocity.y = 0.0;
-            }
-
-            // --- Update Chicken Movement ---
-            for chicken in &mut chickens {
-                // Apply velocity to update position.
-                chicken.apply_velocity(delta_time);
-                // Simple boundary check: reverse horizontal velocity if chicken hits world edges.
-                if chicken.entity.rect.x > 5000.0 || chicken.entity.rect.x < 0.0 {
-                    chicken.velocity.x = -chicken.velocity.x;
-                }
-                // Simple boundary check: reverse vertical velocity if chicken hits vertical limits.
-                if chicken.entity.rect.y > 800.0 || chicken.entity.rect.y < 0.0 {
-                    chicken.velocity.y = -chicken.velocity.y;
-                }
-            }
-
-            // --- Update Cloud Movement ---
-            for cloud in &mut clouds {
-                // Apply velocity to update position.
-                cloud.apply_velocity(delta_time);
-                // If cloud moves too far right, wrap it around to the left side.
-                if cloud.entity.rect.x > 60000.0 {
-                    // Use a large boundary for wrapping
-                    cloud.entity.rect.x = -1024.0; // Reset position far left
-                }
-            }
-        }
-
-        // --- Check Collisions and Game Logic ---
-        {
-            // --- Check Player Falling Off Screen ---
-            // If player falls too far below the screen...
-            if player.entity.rect.bottom() > screen_height() + 100.0 {
-                // End the game due to death.
-                return GameOverReason::Death { score };
-            }
-
-            // --- Egg Collection ---
-            // `retain` keeps only the elements for which the closure returns true.
-            eggs.retain(|egg| {
-                // Check if the player's collision bounds overlap with the egg's bounds.
-                let collided = player
-                    .entity
-                    .get_collision_bounds()
-                    .overlaps(&egg.get_collision_bounds());
-                if collided {
-                    score += 1; // Increase score
-                    play_sound_once(&assets.egg_collect); // Play collection sound
-                }
-                // Return `!collided`: keep the egg if NOT collided, remove it if collided.
-                !collided
-            });
-
-            // --- Chicken Collision ---
-            // Check if the player collides with any chicken.
-            if chickens.iter().any(|chicken| {
-                // `any` returns true if the closure is true for at least one element
-                player
-                    .entity
-                    .get_collision_bounds()
-                    .overlaps(&chicken.entity.get_collision_bounds())
-            }) {
-                play_sound_once(&assets.chicken_hit); // Play hit sound
-                return GameOverReason::Death { score }; // End game
-            }
-
-            // --- Spike Collision ---
-            // Check if the player collides with any spike.
-            if spikes.iter().any(|spike| {
-                player
-                    .entity
-                    .get_collision_bounds()
-                    .overlaps(&spike.get_collision_bounds())
-            }) {
-                play_sound_once(&assets.spike_hit); // Play hit sound
-                return GameOverReason::Death { score }; // End game
-            }
-
-            // --- House Collision (End/Win Condition) ---
-            // Check if the player collides with the house.
-            if player
-                .entity
-                .get_collision_bounds()
-                .overlaps(&house.get_collision_bounds())
-            {
-                // Check if the player has enough eggs to win.
-                if score >= EGGS_NEEDED_FOR_WIN {
-                    return GameOverReason::Win; // Player wins!
-                } else if score >= EGGS_NEEDED_FOR_HOUSE {
-                    // Player reached the house but needs more eggs.
-                    return GameOverReason::End;
-                }
-                // If player has fewer eggs than needed for the house, nothing happens yet.
-            }
-        }
-
-        // --- Draw Everything ---
-        {
-            // Clear the screen with the background color.
-            clear_background(BACKGROUND_COLOR);
-
+        State::Game {
+            player,
+            player_direction,
+            score,
+            clouds,
+            platforms,
+            eggs,
+            chickens,
+            spikes,
+            house,
+            background_entities,
+        } => {
             // --- Camera Setup ---
             // Calculate the camera's target X position to follow the player,
             // but don't let it go left of the starting area (x=0).
@@ -730,36 +733,32 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
             set_camera(&camera);
 
             // --- Draw World Elements (using camera coordinates) ---
-            // Draw backgrounds first, so they are behind everything else.
-            for background in &background_entities {
-                background.draw(&assets.background);
-            }
-            // Draw clouds.
-            for cloud in &clouds {
-                cloud.entity.draw(&assets.cloud);
-            }
-            // Draw platforms.
-            for platform in &platforms {
-                platform.draw(&assets.platform);
-            }
-            // Draw the house.
-            house.draw(&assets.house);
-            // Draw remaining eggs.
-            for egg in &eggs {
-                egg.draw(&assets.egg);
-            }
-            // Draw spikes.
-            for spike in &spikes {
-                spike.draw(&assets.spike);
-            }
-            // Draw chickens.
-            for chicken in &chickens {
-                chicken.entity.draw(&assets.chicken);
-            }
-            // Draw the player using the sprite corresponding to their facing direction.
-            match player_direction {
-                MoveDirection::Right => player.entity.draw(&assets.player_right),
-                MoveDirection::Left => player.entity.draw(&assets.player_left),
+            for (entity, texture) in (background_entities.iter().map(|e| (e, &assets.background)))
+                .chain(clouds.iter().map(|c| (&c.entity, &assets.cloud)))
+                .chain(platforms.iter().map(|p| (p, &assets.platform)))
+                .chain(eggs.iter().map(|e| (e, &assets.egg)))
+                .chain(chickens.iter().map(|c| (&c.entity, &assets.chicken)))
+                .chain(spikes.iter().map(|s| (s, &assets.spike)))
+                .chain(once((house, &assets.house)))
+                .chain(once((
+                    &player.entity,
+                    match player_direction {
+                        MoveDirection::Right => &assets.player_right,
+                        MoveDirection::Left => &assets.player_left,
+                    },
+                )))
+            {
+                draw_texture_ex(
+                    texture,       // The image to draw
+                    entity.rect.x, // X position on screen
+                    entity.rect.y, // Y position on screen
+                    WHITE,         // Tint color (WHITE means no tint)
+                    DrawTextureParams {
+                        // Ensure the texture is drawn at the entity's width and height
+                        dest_size: Some(Vec2::new(entity.rect.w, entity.rect.h)),
+                        ..DrawTextureParams::default() // Use default values for other parameters
+                    },
+                );
             }
 
             // --- Draw UI Elements (using screen coordinates) ---
@@ -796,7 +795,40 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
                 WHITE,                                                // Text color
             );
         }
-        // End of the main game loop iteration. Repeats indefinitely until a GameOverReason is returned.
+        State::GameOver(reason) => {
+            // Choose the appropriate game over image based on the reason.
+            // Draw the chosen game over/win/end screen image, scaled to fit.
+            draw_texture_ex(
+                match reason {
+                    GameOverReason::Death { .. } => &assets.game_over, // Standard game over screen
+                    GameOverReason::End { meme: ending } => &assets.meme_textures[*ending], // Pick a random meme
+                    GameOverReason::Win => &assets.win, // Winning screen
+                },
+                0.0,
+                0.0,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(Vec2::new(screen_width(), screen_height())),
+                    ..Default::default()
+                },
+            );
+
+            // If there's final score text to display (only on Death screen)...
+            if let GameOverReason::Death { score, .. } = reason {
+                // Calculate text position relative to screen size for consistent placement.
+                let text_x = screen_width() * 0.415;
+                let text_y = screen_height() * 0.227;
+                let font_size = 0.04 * screen_height(); // Scale font size with screen height
+                                                        // Draw the final score text.
+                draw_text(
+                    &format!("Final Score: {score}"),
+                    text_x,
+                    text_y,
+                    font_size,
+                    WHITE,
+                );
+            }
+        }
     }
 }
 
@@ -816,19 +848,40 @@ fn window_conf() -> Conf {
 /// as the starting point.
 #[macroquad::main(window_conf)]
 async fn main() {
-    // Load all assets before starting the game.
-    // `.await` is used because `load_assets` is an async function.
-    let textures = load_assets().await;
-
-    // Show the start screen and wait for the player to begin.
-    start_screen(&textures).await;
-
-    // The main application loop: Play -> Game Over -> Restart -> Play ...
+    let assets = load_assets().await;
+    let mut state = State::Start;
+    // Start playing the background music on loop.
+    play_sound(
+        &assets.background_music,
+        PlaySoundParams {
+            looped: true, // Keep playing after it finishes
+            volume: 0.5,  // Set volume to 50%
+        },
+    );
     loop {
-        // Run the game screen loop until it returns a reason for ending.
-        let game_over_reason = game_screen(&textures).await;
-        // Show the game over screen and wait for the player to restart.
-        game_over_screen(&textures, game_over_reason).await;
-        // The loop repeats, starting `game_screen` again.
+        draw(&state, &assets); // Draw the current game state
+        next_frame().await; // Wait for the next frame to start
+        let input_events = state.process_input(); // Handle user input
+        let update_events = state.update(get_frame_time()); // Update game state
+        for event in input_events.into_iter().chain(update_events) {
+            match event {
+                Event::Jumped => play_sound_once(&assets.jump),
+                Event::Scored => play_sound_once(&assets.egg_collect),
+                Event::GameOver(GameOverReason::Win) => play_sound_once(&assets.win_sound),
+                Event::GameOver(GameOverReason::End { .. }) => play_sound_once(&assets.magic),
+                Event::GameOver(GameOverReason::Death {
+                    cause: DeathCause::Chicken,
+                    ..
+                }) => play_sound_once(&assets.chicken_hit),
+                Event::GameOver(GameOverReason::Death {
+                    cause: DeathCause::Spike,
+                    ..
+                }) => play_sound_once(&assets.spike_hit),
+                Event::GameOver(GameOverReason::Death {
+                    cause: DeathCause::Fall,
+                    ..
+                }) => play_sound_once(&assets.game_over_sound),
+            }
+        }
     }
 }
