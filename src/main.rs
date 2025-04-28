@@ -10,8 +10,6 @@ use macroquad::rand::{gen_range, ChooseRandom};
 const GRAVITY: f32 = 1000.0; // Increased gravity for fixed timestep
 const GROUND_DETECTION_BUFFER: f32 = 5.0;
 const COLLISION_MARGIN: f32 = 2.0;
-const PHYSICS_TIMESTEP: f32 = 1.0 / 60.0; // Fixed 60 updates per second
-const MAX_DELTA_TIME: f32 = 0.1; // Cap delta time to prevent large jumps
 
 // Player constants
 const PLAYER_START_POS: Vec2 = Vec2::new(243.0, 350.0);
@@ -418,16 +416,9 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
         velocity: Vec2::ZERO,
     };
 
-    // Track accumulated time for fixed timestep physics
-    let mut accumulated_time = 0.0;
-
     loop {
         // Clear the screen
         next_frame().await;
-
-        // Cap delta time to prevent large jumps on lag
-        let delta_time = get_frame_time().min(MAX_DELTA_TIME);
-        accumulated_time += delta_time;
 
         // Handle input
         {
@@ -447,72 +438,67 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
             }
         }
 
-        // Update physics at fixed timesteps
-        while accumulated_time >= PHYSICS_TIMESTEP {
-            accumulated_time -= PHYSICS_TIMESTEP;
+        // Update game state
+        {
+            let delta_time = get_frame_time();
+            player.velocity.y += GRAVITY * delta_time;
 
-            // Update game state with fixed timestep
-            {
-                player.velocity.y += GRAVITY * PHYSICS_TIMESTEP;
+            let ground_collision = platforms.iter().find_map(|platform| {
+                // Check horizontal overlap using Rect methods
+                let horizontally_overlapping =
+                    player.rect.right() > platform.rect.x && player.rect.x < platform.rect.right();
 
-                let ground_collision = platforms.iter().find_map(|platform| {
-                    // Check horizontal overlap using Rect methods
-                    let horizontally_overlapping = player.rect.right() > platform.rect.x
-                        && player.rect.x < platform.rect.right();
+                // Check vertical conditions for ground detection
+                let falling_towards_platform = player.velocity.y >= 0.0;
+                let close_to_platform_top =
+                    player.rect.bottom() <= platform.rect.y + GROUND_DETECTION_BUFFER;
+                let will_intersect_next_frame =
+                    player.rect.bottom() + player.velocity.y * delta_time >= platform.rect.y;
 
-                    // Check vertical conditions for ground detection
-                    let falling_towards_platform = player.velocity.y >= 0.0;
-                    let close_to_platform_top =
-                        player.rect.bottom() <= platform.rect.y + GROUND_DETECTION_BUFFER;
-                    let will_intersect_next_frame = player.rect.bottom()
-                        + player.velocity.y * PHYSICS_TIMESTEP
-                        >= platform.rect.y;
-
-                    if horizontally_overlapping
-                        && falling_towards_platform
-                        && close_to_platform_top
-                        && will_intersect_next_frame
-                    {
-                        Some(platform.rect.y)
-                    } else {
-                        None
-                    }
-                });
-
-                player.rect.x += player.velocity.x * PHYSICS_TIMESTEP;
-                player.rect.y += player.velocity.y * PHYSICS_TIMESTEP;
-
-                if let Some(platform_top) = ground_collision {
-                    player.rect.y = platform_top - player.rect.h;
-                    player.velocity.y = 0.0;
+                if horizontally_overlapping
+                    && falling_towards_platform
+                    && close_to_platform_top
+                    && will_intersect_next_frame
+                {
+                    Some(platform.rect.y)
+                } else {
+                    None
                 }
+            });
 
-                if player.rect.bottom() > screen_height() + 100.0 {
-                    return GameOverReason::Death { score };
-                }
+            player.rect.x += player.velocity.x * delta_time;
+            player.rect.y += player.velocity.y * delta_time;
 
-                // Update chickens with fixed timestep
-                for chicken in &mut chickens {
-                    let new_x = chicken.rect.x + chicken.velocity.x * PHYSICS_TIMESTEP;
-                    let new_y = chicken.rect.y + chicken.velocity.y * PHYSICS_TIMESTEP;
-                    if new_x > 5000.0 || new_x < 0.0 {
-                        chicken.velocity.x = -chicken.velocity.x;
-                    } else {
-                        chicken.rect.x = new_x;
-                    };
-                    if new_y > 800.0 || new_y < 0.0 {
-                        chicken.velocity.y = -chicken.velocity.y;
-                    } else {
-                        chicken.rect.y = new_y;
-                    };
-                }
+            if let Some(platform_top) = ground_collision {
+                player.rect.y = platform_top - player.rect.h;
+                player.velocity.y = 0.0;
+            }
 
-                // Update clouds with fixed timestep
-                for cloud in &mut clouds {
-                    cloud.rect.x += cloud.velocity.x * PHYSICS_TIMESTEP;
-                    if cloud.rect.x > 60000.0 {
-                        cloud.rect.x = -1024.0;
-                    }
+            if player.rect.bottom() > screen_height() + 100.0 {
+                return GameOverReason::Death { score };
+            }
+
+            // Update chickens with fixed timestep
+            for chicken in &mut chickens {
+                let new_x = chicken.rect.x + chicken.velocity.x * delta_time;
+                let new_y = chicken.rect.y + chicken.velocity.y * delta_time;
+                if new_x > 5000.0 || new_x < 0.0 {
+                    chicken.velocity.x = -chicken.velocity.x;
+                } else {
+                    chicken.rect.x = new_x;
+                };
+                if new_y > 800.0 || new_y < 0.0 {
+                    chicken.velocity.y = -chicken.velocity.y;
+                } else {
+                    chicken.rect.y = new_y;
+                };
+            }
+
+            // Update clouds with fixed timestep
+            for cloud in &mut clouds {
+                cloud.rect.x += cloud.velocity.x * delta_time;
+                if cloud.rect.x > 60000.0 {
+                    cloud.rect.x = -1024.0;
                 }
             }
         }
