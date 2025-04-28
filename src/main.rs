@@ -149,9 +149,13 @@ fn draw_scaled_text(text: &str, x_ratio: f32, y_ratio: f32, font_size: f32, colo
 
 // Game entity struct
 struct GameEntity {
-    texture: Texture2D,
     rect: Rect,
     velocity: Vec2,
+}
+
+enum MoveDirection {
+    Left,
+    Right,
 }
 
 impl GameEntity {
@@ -166,9 +170,9 @@ impl GameEntity {
     }
 
     // Helper function to draw an entity (no need for offset with Camera2D)
-    fn draw(&self) {
+    fn draw(&self, texture: &Texture2D) {
         draw_texture_ex(
-            &self.texture,
+            texture,
             self.rect.x,
             self.rect.y,
             WHITE,
@@ -242,7 +246,7 @@ async fn game_over_screen(assets: &Assets, reason: GameOverReason) {
         clear_background(BACKGROUND_COLOR);
         // Draw game over screen based on reason
         draw_texture_ex(
-            &texture,
+            texture,
             0.0,
             0.0,
             WHITE,
@@ -262,7 +266,6 @@ async fn game_over_screen(assets: &Assets, reason: GameOverReason) {
 async fn game_screen(assets: &Assets) -> GameOverReason {
     // Create player
     let mut player = GameEntity {
-        texture: assets.player_right.clone(),
         rect: Rect {
             x: PLAYER_START_POS.x - PLAYER_SIZE.x / 2.0,
             y: PLAYER_START_POS.y - PLAYER_SIZE.y / 2.0,
@@ -271,6 +274,7 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
         },
         velocity: Vec2::ZERO,
     };
+    let mut player_direction = MoveDirection::Right;
     let mut score = 0;
 
     // Create background entities (based on Haskell implementation)
@@ -278,7 +282,6 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
         .map(|i| {
             let x = -1024.0 + i as f32 * 1024.0;
             GameEntity {
-                texture: assets.background.clone(),
                 rect: Rect {
                     x: x - BACKGROUND_SIZE.x / 2.0,
                     y: 336.0 - BACKGROUND_SIZE.y / 2.0,
@@ -296,7 +299,6 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
             let x = -1024.0 + 500.0 * i as f32;
             let y = gen_range(100.0, 500.0); // Random height
             GameEntity {
-                texture: assets.cloud.clone(),
                 rect: Rect {
                     x: x - CLOUD_SIZE.x / 2.0,
                     y: y - CLOUD_SIZE.y / 2.0,
@@ -312,7 +314,6 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
     let platforms: Vec<GameEntity> = (-429..=2000)
         .step_by(400) // Increase spacing between platforms to 400 units
         .map(|x| GameEntity {
-            texture: assets.platform.clone(),
             rect: Rect {
                 x: x as f32 - PLATFORM_SIZE.x / 2.0,
                 y: screen_height() - PLATFORM_SIZE.y,
@@ -325,7 +326,6 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
             let x = i as f32 * 50.0 + gen_range(-200.0, 200.0); // Adjust random offset to be smaller
             let y = gen_range(150.0, 650.0);
             GameEntity {
-                texture: assets.platform.clone(),
                 rect: Rect {
                     x: x - PLATFORM_BAR_SIZE.x / 2.0,
                     y: y - PLATFORM_BAR_SIZE.y / 2.0,
@@ -348,7 +348,6 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
             let y = platform.rect.y - EGG_SIZE.y + 5.0;
 
             GameEntity {
-                texture: assets.egg.clone(),
                 rect: Rect {
                     x: x - EGG_SIZE.x / 2.0,
                     y,
@@ -374,7 +373,6 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
             let vy = gen_range(30.0, 80.0) * (if gen_range(0, 2) == 0 { 1.0 } else { -1.0 });
 
             GameEntity {
-                texture: assets.chicken.clone(),
                 rect: Rect {
                     x: x - CHICKEN_SIZE.x / 2.0,
                     y: y - CHICKEN_SIZE.y / 2.0,
@@ -393,7 +391,6 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
             platform.rect.center().y > screen_height() - PLATFORM_SIZE.y && gen_range(0, 5) == 0
         })
         .map(|platform| GameEntity {
-            texture: assets.spike.clone(),
             rect: Rect {
                 x: platform.rect.right() - SPIKE_SIZE.x / 2.0,
                 y: platform.rect.y - SPIKE_SIZE.y + 5.0,
@@ -406,7 +403,6 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
 
     // Create houses (end goals) with similar positioning to Haskell version
     let house = GameEntity {
-        texture: assets.house.clone(),
         rect: Rect {
             x: 3000.0 - HOUSE_SIZE.x / 2.0,
             y: 292.0 - HOUSE_SIZE.y / 2.0,
@@ -422,16 +418,19 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
 
         // Handle input
         {
-            player.velocity.x = match (is_key_down(KeyCode::Left), is_key_down(KeyCode::Right)) {
-                (true, false) => -PLAYER_MOVEMENT_SPEED,
-                (false, true) => PLAYER_MOVEMENT_SPEED,
-                _ => 0.0,
+            match (is_key_down(KeyCode::Left), is_key_down(KeyCode::Right)) {
+                (true, false) => {
+                    player_direction = MoveDirection::Left;
+                    player.velocity.x = -PLAYER_MOVEMENT_SPEED;
+                }
+                (false, true) => {
+                    player_direction = MoveDirection::Right;
+                    player.velocity.x = PLAYER_MOVEMENT_SPEED;
+                }
+                _ => {
+                    player.velocity.x = 0.0;
+                }
             };
-            if player.velocity.x < 0.0 {
-                player.texture = assets.player_left.clone();
-            } else if player.velocity.x > 0.0 {
-                player.texture = assets.player_right.clone();
-            }
             if is_key_pressed(KeyCode::Up) && player.velocity.y == 0.0 {
                 player.velocity.y = -PLAYER_JUMP_SPEED;
                 play_sound_once(&assets.jump);
@@ -568,25 +567,28 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
 
             // Draw all world elements with their actual coordinates
             for background in &background_entities {
-                background.draw();
+                background.draw(&assets.background);
             }
             for cloud in &clouds {
-                cloud.draw();
+                cloud.draw(&assets.cloud);
             }
             for platform in &platforms {
-                platform.draw();
+                platform.draw(&assets.platform);
             }
-            house.draw();
+            house.draw(&assets.house);
             for egg in &eggs {
-                egg.draw();
+                egg.draw(&assets.egg);
             }
             for spike in &spikes {
-                spike.draw();
+                spike.draw(&assets.spike);
             }
             for chicken in &chickens {
-                chicken.draw();
+                chicken.draw(&assets.chicken);
             }
-            player.draw();
+            match player_direction {
+                MoveDirection::Right => player.draw(&assets.player_right),
+                MoveDirection::Left => player.draw(&assets.player_left),
+            }
 
             // Switch back to default camera for UI elements
             set_default_camera();
