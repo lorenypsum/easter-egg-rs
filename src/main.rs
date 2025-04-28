@@ -443,22 +443,20 @@ async fn game_screen(assets: &Assets) -> GameOverReason {
             let delta_time = get_frame_time();
             player.velocity.y += GRAVITY * delta_time;
 
+            // Create a small rectangle just below the player to detect ground
+            let ground_detector = Rect {
+                x: player.rect.x + COLLISION_MARGIN,
+                y: player.rect.bottom(),
+                w: player.rect.w - (COLLISION_MARGIN * 2.0),
+                h: GROUND_DETECTION_BUFFER,
+            };
+
             let ground_collision = platforms.iter().find_map(|platform| {
-                // Check horizontal overlap using Rect methods
-                let horizontally_overlapping =
-                    player.rect.right() > platform.rect.x && player.rect.x < platform.rect.right();
-
-                // Check vertical conditions for ground detection
-                let falling_towards_platform = player.velocity.y >= 0.0;
-                let close_to_platform_top =
-                    player.rect.bottom() <= platform.rect.y + GROUND_DETECTION_BUFFER;
-                let will_intersect_next_frame =
-                    player.rect.bottom() + player.velocity.y * delta_time >= platform.rect.y;
-
-                if horizontally_overlapping
-                    && falling_towards_platform
-                    && close_to_platform_top
-                    && will_intersect_next_frame
+                // Only detect ground when player is falling AND
+                // the player's bottom is at or above the platform's top
+                if player.velocity.y >= 0.0
+                    && platform.rect.overlaps(&ground_detector)
+                    && player.rect.bottom() <= platform.rect.y + GROUND_DETECTION_BUFFER
                 {
                     Some(platform.rect.y)
                 } else {
